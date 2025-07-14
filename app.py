@@ -12,112 +12,119 @@ from ultralytics import YOLO
 import torch.nn.modules.container
 import ultralytics.nn.modules
 
+# Streamlit UI setup
 st.set_page_config(page_title="VisionTrace", layout="wide")
 st.title("🔍 VisionTrace: Person Finder in CCTV Footage")
 
-# Upload query image
-query_image_file = st.file_uploader("Upload image of the person to search for", type=["jpg", "jpeg", "png"])
-video_files = st.file_uploader("Upload CCTV videos", type=["mp4"], accept_multiple_files=True)
+# Upload input files
+query_image_file = st.file_uploader("📷 Upload image of the person to search for", type=["jpg", "jpeg", "png"])
+video_files = st.file_uploader("🎥 Upload CCTV videos", type=["mp4"], accept_multiple_files=True)
+SIMILARITY_THRESHOLD = st.slider("🎯 Similarity threshold", 0.3, 1.0, 0.75, 0.01)
 
-SIMILARITY_THRESHOLD = st.slider("Similarity threshold", 0.3, 1.0, 0.75, 0.01)
-
+# Show start button only when both inputs are present
 if query_image_file and video_files:
-    # Prepare output
-    os.makedirs("results", exist_ok=True)
+    if st.button("🚀 Start Search"):
 
-    # Monkey-patch torch.load to allow full checkpoint deserialization (for YOLOv8 weights)
-    original_load = torch.load
-    def patched_load(*args, **kwargs):
-        kwargs['weights_only'] = False
-        return original_load(*args, **kwargs)
-    torch.load = patched_load
+        # Create results folder
+        os.makedirs("results", exist_ok=True)
 
-    # Load models
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    yolo = YOLO('yolov8n.pt')
-    torch.load = original_load
+        # Monkey-patch torch.load to allow full YOLOv8 weight loading
+        original_load = torch.load
+        def patched_load(*args, **kwargs):
+            kwargs['weights_only'] = False
+            return original_load(*args, **kwargs)
+        torch.load = patched_load
 
-    def load_model(model_name='osnet_x1_0'):
-        model = torchreid.models.build_model(
-            name=model_name,
-            num_classes=1000,
-            loss='softmax',
-            pretrained=True
-        )
-        model.eval()
-        return model.to(device)
+        # Load models
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        yolo = YOLO('yolov8n.pt')  # YOLOv8 for person detection
+        torch.load = original_load
 
-    def preprocess(img, height=256, width=128):
-        transform = T.Compose([
-            T.ToPILImage(),
-            T.Resize((height, width)),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-        return transform(img).unsqueeze(0)
+        def load_model(model_name='osnet_x1_0'):
+            model = torchreid.models.build_model(
+                name=model_name,
+                num_classes=1000,
+                loss='softmax',
+                pretrained=True
+            )
+            model.eval()
+            return model.to(device)
 
-    def extract_features(img):
-        with torch.no_grad():
-            input_tensor = preprocess(img).to(device)
-            features = reid_model(input_tensor)
-            return features.cpu().numpy()
+        def preprocess(img, height=256, width=128):
+            transform = T.Compose([
+                T.ToPILImage(),
+                T.Resize((height, width)),
+                T.ToTensor(),
+                T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ])
+            return transform(img).unsqueeze(0)
 
-    # Load ReID model
-    reid_model = load_model()
+        def extract_features(img):
+            with torch.no_grad():
+                input_tensor = preprocess(img).to(device)
+                features = reid_model(input_tensor)
+                return features.cpu().numpy()
 
-    # Read query image
-    query_bytes = np.frombuffer(query_image_file.read(), np.uint8)
-    query_img = cv2.imdecode(query_bytes, cv2.IMREAD_COLOR)
-    query_feat = extract_features(query_img)
+        # Load Re-ID model
+        reid_model = load_model()
 
-    found_matches = []
+        # Read and preprocess the query image
+        query_bytes = np.frombuffer(query_image_file.read(), np.uint8)
+        query_img = cv2.imdecode(query_bytes, cv2.IMREAD_COLOR)
+        query_feat = extract_features(query_img)
 
-    for video_file in video_files:
-        st.markdown(f"### 📹 Processing {video_file.name}")
-        tfile = open(f"temp_{video_file.name}", 'wb')
-        tfile.write(video_file.read())
-        tfile.close()
+        found_matches = []
 
-        cap = cv2.VideoCapture(f"temp_{video_file.name}")
-        frame_idx = 0
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        # Process each uploaded video
+        for video_file in video_files:
+            st.markdown(f"### 📹 Processing `{video_file.name}`")
+            temp_path = f"temp_{video_file.name}"
+            with open(temp_path, 'wb') as f:
+                f.write(video_file.read())
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+            cap = cv2.VideoCapture(temp_path)
+            frame_idx = 0
+            fps = cap.get(cv2.CAP_PROP_FPS)
 
-            frame_idx += 1
-            if frame_idx % 10 != 0:
-                continue
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            results = yolo(frame)[0]
-            for box in results.boxes:
-                cls = int(box.cls[0])
-                if cls != 0:
-                    continue
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                person_crop = frame[y1:y2, x1:x2]
+                frame_idx += 1
+                if frame_idx % 10 != 0:
+                    continue  # Skip some frames for faster processing
 
-                try:
-                    feat = extract_features(person_crop)
-                    sim = cosine_similarity(query_feat, feat)[0][0]
+                results = yolo(frame)[0]  # Run YOLO detection
+                for box in results.boxes:
+                    cls = int(box.cls[0])
+                    if cls != 0:
+                        continue  # Class 0 is person
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    person_crop = frame[y1:y2, x1:x2]
 
-                    if sim > SIMILARITY_THRESHOLD:
-                        timestamp = str(timedelta(seconds=frame_idx / fps))
-                        st.success(f"🎯 Match found in {video_file.name} at {timestamp} | Score: {sim:.2f}")
-                        st.image(cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB), caption=f"{video_file.name} @ {timestamp}", width=300)
-                        found_matches.append((video_file.name, timestamp, sim))
-                except Exception as e:
-                    st.warning(f"⚠️ Error processing frame {frame_idx}: {e}")
-                    continue
+                    try:
+                        feat = extract_features(person_crop)
+                        sim = cosine_similarity(query_feat, feat)[0][0]
 
-        cap.release()
-        os.remove(f"temp_{video_file.name}")
+                        if sim > SIMILARITY_THRESHOLD:
+                            timestamp = str(timedelta(seconds=frame_idx / fps))
+                            st.success(f"🎯 Match in `{video_file.name}` at `{timestamp}` | Score: `{sim:.2f}`")
+                            st.image(cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB),
+                                     caption=f"{video_file.name} @ {timestamp}",
+                                     width=300)
+                            found_matches.append((video_file.name, timestamp, sim))
+                    except Exception as e:
+                        st.warning(f"⚠️ Error at frame {frame_idx}: {e}")
+                        continue
 
-    if not found_matches:
-        st.info("No matches found.")
-    else:
-        st.success(f"✅ Completed! Total matches: {len(found_matches)}")
+            cap.release()
+            os.remove(temp_path)
+
+        # Final results
+        if not found_matches:
+            st.info("🔎 No matches found.")
+        else:
+            st.success(f"✅ Completed! Total matches found: {len(found_matches)}")
 else:
-    st.info("Upload both query image and videos to begin.")
+    st.info("📥 Please upload both a query image and one or more CCTV videos to begin.")
