@@ -1,9 +1,10 @@
 streamlit
 torch
 torchvision
+torchaudio
 opencv-python-headless
 scikit-learn
 numpy
-Pillow
+pillow
 ultralytics
 git+https://github.com/KaiyangZhou/deep-person-reid.git
