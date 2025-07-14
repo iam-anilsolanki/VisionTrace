@@ -1,10 +1,9 @@
 streamlit
-opencv-python-headless
 torch
 torchvision
-ultralytics
-torchreid
+opencv-python-headless
 scikit-learn
+numpy
 Pillow
-gdown
-tensorboard
+ultralytics
+git+https://github.com/KaiyangZhou/deep-person-reid.git
